@@ -77,3 +77,12 @@ tasks.register('shadowJar', Jar) {
     archiveClassifier.set('shadow')
     archiveFileName.set("${rootProject.name}-${project.version}-all.jar")
 }
+
+tasks.register('runTest', JavaExec) {
+    group = 'verification'
+    description = 'Runs the ZSCompetitionsPluginTest to launch RuneLite with the plugin'
+
+    mainClass.set('nl.doonline.ZSCompetitions.ZSCompetitionsPluginTest')
+    classpath = sourceSets.main.runtimeClasspath + sourceSets.test.runtimeClasspath
+    jvmArgs '-ea'
+}

@@ -14,8 +14,10 @@ import net.runelite.client.chat.ChatMessageManager;
 import net.runelite.client.chat.QueuedMessage;
 import net.runelite.client.eventbus.Subscribe;
 import okhttp3.*;
+import org.jetbrains.annotations.NotNull;
 
 import javax.inject.Inject;
+import java.awt.Polygon;
 import java.awt.Rectangle;
 import java.awt.Shape;
 import java.io.IOException;
@@ -51,14 +53,18 @@ public class EventTrackerService {
     private ScheduledFuture<?> connectionCheckTask;
     private ScheduledFuture<?> popupTask;
 
+
+    private final VisionTrackerService visionTrackerService;
+
     @Inject
-    public EventTrackerService(Client client, ClientThread clientThread, EventTrackerConfig config, Gson gson, OkHttpClient okHttpClient, ChatMessageManager chatMessageManager) {
+    public EventTrackerService(Client client, ClientThread clientThread, EventTrackerConfig config, Gson gson, OkHttpClient okHttpClient, ChatMessageManager chatMessageManager, VisionTrackerService visionTrackerService) {
         this.client = client;
         this.clientThread = clientThread;
         this.config = config;
         this.gson = gson;
         this.okHttpClient = okHttpClient;
         this.chatMessageManager = chatMessageManager;
+        this.visionTrackerService = visionTrackerService;
         registerSchemas();
     }
 
@@ -98,13 +104,17 @@ public class EventTrackerService {
             // HTML endpoint for human-readable browsing
             pollingServer.get("/", ctx -> {
                 StringBuilder sb = new StringBuilder();
-                sb.append("<h1>0ZS Competitions Event API</h1>");
-                sb.append("<h2>API Endpoints:</h2>");
+                sb.append("<h1>0ZS Competition Event Proxy Server</h1>");
+                sb.append("<p>Remains hidden for common users. debugging should be done here, i dont have to store any data in this way. and makes it easier for our main host domain to manage the player driven community events and clan competitions.</p>");
+                sb.append("<p>We do not store session data unless we have to inquire on some specifics if it comes to which player actually won the contest. we keep session timelines only in memory.</p>");
+                sb.append("<h2>Endpoints:</h2>");
                 sb.append("<ul>");
-                sb.append("<li><a href='/api'>/api</a> - JSON index of all endpoints and schemas</li>");
-                sb.append("<li><a href='/api/poll'>/api/poll</a> - JSON array of all cached game events</li>");
-                sb.append("<li><a href='/api/nearby-npcs'>/api/nearby-npcs</a> - JSON array of currently visible NPCs</li>");
-                sb.append("<li><a href='/api/nearby-objects'>/api/nearby-objects</a> - JSON array of currently visible game objects</li>");
+                sb.append("<li><a href='/api'>instructions</a></li>");
+                sb.append("<li><a href='/api/client/session'>session_replay</a></li>");
+                sb.append("<li><a href='/api/state/player'>player_view_visible</a></li>");
+                sb.append("<li><a href='/api/state/npcs'>npc_view_visible</a></li>");
+                sb.append("<li><a href='/api/state/objects'>object_view_visible</a></li>");
+                sb.append("<li><a href='/api/vision'>vision_data</a></li>");
                 sb.append("</ul>");
                 sb.append("<h2>Available Event Schemas:</h2>");
                 sb.append("<ul>");
@@ -119,32 +129,28 @@ public class EventTrackerService {
             // JSON endpoints for programmatic access
             pollingServer.get("/api", ctx -> {
                 Map<String, Object> index = new ConcurrentHashMap<>();
-                index.put("description", "0ZS Competitions Event API");
-                Map<String, String> endpoints = new ConcurrentHashMap<>();
-                endpoints.put("/api", "This JSON index.");
-                endpoints.put("/api/session/playback", "GET a JSON array of all cached game events.");
-                endpoints.put("/api/state/npc", "GET a JSON array of currently visible NPCs.");
-                endpoints.put("/api/state/object", "GET a JSON array of currently visible game objects.");
-                endpoints.put("/api/schema/{eventType}", "GET the data schema for a specific event type.");
+                index.put("description", "0ZS Competitions Replay System");
+                Map<String, String> endpoints = getStringStringMap();
                 index.put("endpoints", endpoints);
                 index.put("availableEventSchemas", schemaRegistry.keySet().stream().sorted().collect(Collectors.toList()));
                 ctx.json(index);
             });
 
-            pollingServer.get("/api/session/playback", ctx -> ctx.json(eventCache));
+            pollingServer.get("/api/client/session", ctx -> ctx.json(eventCache));
 
-            pollingServer.get("/api/state/npc", ctx -> {
-                CompletableFuture<List<Map<String, Object>>> future = new CompletableFuture<>();
+            // New unified endpoint
+            pollingServer.get("/api/all_game_data", ctx -> {
+                CompletableFuture<Map<String, Object>> future = new CompletableFuture<>();
                 clientThread.invoke(() -> {
-                    List<Map<String, Object>> result = new ArrayList<>();
-                    for (NPC npc : client.getNpcs()) {
-                        Map<String, Object> npcData = new ConcurrentHashMap<>();
-                        npcData.put("name", npc.getName());
-                        npcData.put("id", npc.getId());
-                        npcData.put("boundingBox", getBoundingBox(npc));
-                        result.add(npcData);
+                    try {
+                        Map<String, Object> allData = new ConcurrentHashMap<>();
+                        allData.put("player", getPlayerData(client.getLocalPlayer()));
+                        allData.putAll(visionTrackerService.getUnifiedVisionData()); // Add all data from VisionTrackerService
+                        future.complete(allData);
+                    } catch (InterruptedException | ExecutionException e) {
+                        log.error("Error getting unified vision data", e);
+                        future.completeExceptionally(e);
                     }
-                    future.complete(result);
                 });
                 try {
                     ctx.json(future.get());
@@ -153,27 +159,10 @@ public class EventTrackerService {
                 }
             });
 
-            pollingServer.get("/api/state/object", ctx -> {
-                CompletableFuture<List<Map<String, Object>>> future = new CompletableFuture<>();
+            pollingServer.get("/api/state/player", ctx -> {
+                CompletableFuture<Map<String, Object>> future = new CompletableFuture<>();
                 clientThread.invoke(() -> {
-                    List<Map<String, Object>> result = new ArrayList<>();
-                    Scene scene = client.getScene();
-                    Tile[][][] tiles = scene.getTiles();
-                    int plane = client.getPlane();
-                    for (int x = 0; x < Constants.SCENE_SIZE; x++) {
-                        for (int y = 0; y < Constants.SCENE_SIZE; y++) {
-                            Tile tile = tiles[plane][x][y];
-                            if (tile == null) continue;
-                            for (GameObject gameObject : tile.getGameObjects()) {
-                                if (gameObject == null) continue;
-                                Map<String, Object> objectData = new ConcurrentHashMap<>();
-                                objectData.put("id", gameObject.getId());
-                                objectData.put("boundingBox", getBoundingBox(gameObject));
-                                result.add(objectData);
-                            }
-                        }
-                    }
-                    future.complete(result);
+                    future.complete(getPlayerData(client.getLocalPlayer()));
                 });
                 try {
                     ctx.json(future.get());
@@ -181,6 +170,12 @@ public class EventTrackerService {
                     ctx.status(500).result("Error processing request on client thread: " + e.getMessage());
                 }
             });
+
+
+
+
+
+
 
             pollingServer.get("/api/schema/{eventType}", ctx -> {
                 String eventType = ctx.pathParam("eventType");
@@ -196,6 +191,55 @@ public class EventTrackerService {
             log.error("Failed to start polling server", e);
         }
     }
+
+    private static @NotNull Map<String, String> getStringStringMap() {
+        Map<String, String> endpoints = new ConcurrentHashMap<>();
+        endpoints.put("/api", "This JSON index.");
+        endpoints.put("/api/client/session", "GET a JSON array of all cached game events.");
+        endpoints.put("/api/all_game_data", "GET a single JSON object containing all visible game data (player, tiles, NPCs, objects, ground items).");
+        endpoints.put("/api/schema/{eventType}", "GET the data schema for a specific event type.");
+        return endpoints;
+    }
+
+    private Map<String, Object> getPlayerData(Player player) {
+        if (player == null) {
+            return Collections.emptyMap();
+        }
+
+        Map<String, Object> playerData = new ConcurrentHashMap<>();
+        playerData.put("playerName", player.getName());
+
+        WorldPoint worldPoint = player.getWorldLocation();
+        if (worldPoint != null) {
+            Map<String, Integer> worldPos = new ConcurrentHashMap<>();
+            worldPos.put("x", worldPoint.getX());
+            worldPos.put("y", worldPoint.getY());
+            worldPos.put("plane", worldPoint.getPlane());
+            playerData.put("worldPosition", worldPos);
+        }
+
+        Polygon occupiedTiles = player.getCanvasTilePoly();
+        if (occupiedTiles != null) {
+            List<Map<String, Object>> tiles = new ArrayList<>();
+            Rectangle bounds = occupiedTiles.getBounds();
+            for (int i = bounds.x; i < bounds.x + bounds.width; i++) {
+                for (int j = bounds.y; j < bounds.y + bounds.height; j++) {
+                    Map<String, Object> tile = new ConcurrentHashMap<>();
+                    tile.put("x", i);
+                    tile.put("y", j);
+                    tile.put("plane", player.getWorldLocation().getPlane());
+                    tiles.add(tile);
+                }
+            }
+            playerData.put("occupiedTiles", tiles);
+        }
+
+        return playerData;
+    }
+
+
+
+
 
     private void registerSchemas() {
         schemaRegistry.put("GAME_STATE_CHANGED", Map.of("gameState", "String"));
@@ -267,6 +311,7 @@ public class EventTrackerService {
         for (Map<String, Object> event : eventCache) {
             postEvent(event, false);
         }
+        eventCache.clear(); // Clear the cache after flushing
     }
 
     private void showConnectionFailedPopup() {
@@ -340,14 +385,14 @@ public class EventTrackerService {
         } else {
             okHttpClient.newCall(request).enqueue(new Callback() {
                 @Override
-                public void onFailure(Call call, IOException e) {
+                public void onFailure(@NotNull Call call, IOException e) {
                     if (connected && config.enableConnectionHandling()) {
                         startConnectionCheck();
                     }
                 }
 
                 @Override
-                public void onResponse(Call call, Response response) throws IOException {
+                public void onResponse(@NotNull Call call, @NotNull Response response) throws IOException {
                     if (!response.isSuccessful()) {
                         log.warn("Unexpected code {} when posting event", response.code());
                     }
@@ -360,12 +405,18 @@ public class EventTrackerService {
     @Subscribe
     public void onGameTick(GameTick gameTick) {
         if (config.pushActorPositionUpdates()) {
-            for (NPC npc : client.getNpcs()) {
-                Map<String, Object> data = new ConcurrentHashMap<>();
-                data.put("actorName", npc.getName());
-                data.put("actorId", npc.getId());
-                data.put("boundingBox", getBoundingBox(npc));
-                sendEvent("ACTOR_POSITION_UPDATE", data);
+            int wvIdMin = -1; // i have no idea what id we need to use so im going to do a few together.
+            int wvIdMax = 1;
+            for (int i=wvIdMin; i<=wvIdMax; i++) {
+                WorldView currentWv = client.getWorldView(i);
+                for (NPC npc : currentWv.npcs()) {
+                    Map<String, Object> data = new ConcurrentHashMap<>();
+                    data.put("actorName", npc.getName());
+                    data.put("actorId", npc.getId());
+                    data.put("boundingBox", getBoundingBox(npc));
+                    data.put("worldViewId", "_" + i + "_wvId");
+                    sendEvent("ACTOR_POSITION_UPDATE", data);
+                }
             }
         }
     }

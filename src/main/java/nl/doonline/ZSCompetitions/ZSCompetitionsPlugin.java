@@ -23,15 +23,23 @@ public class ZSCompetitionsPlugin extends Plugin {
     @Inject
     private EventTrackerService eventTrackerService;
 
+    @Inject
+    private VisionTrackerService visionTrackerService;
+
+    @Inject
+    private HumanizerService humanizerService;
+
     @Override
     protected void startUp() throws Exception {
         log.info("0ZS Competitions plugin started!");
         eventBus.register(eventTrackerService);
         eventTrackerService.start();
+
     }
 
     @Override
     protected void shutDown() throws Exception {
+
         eventTrackerService.stop();
         eventBus.unregister(eventTrackerService);
         log.info("0ZS Competitions plugin stopped!");
