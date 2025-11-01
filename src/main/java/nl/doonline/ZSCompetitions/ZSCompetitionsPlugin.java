@@ -26,9 +26,6 @@ public class ZSCompetitionsPlugin extends Plugin {
     @Inject
     private VisionTrackerService visionTrackerService;
 
-    @Inject
-    private HumanizerService humanizerService;
-
     @Override
     protected void startUp() throws Exception {
         log.info("0ZS Competitions plugin started!");
